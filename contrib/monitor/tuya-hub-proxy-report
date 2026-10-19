@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Summarise proxy stability and sensor activity.
+
+    tuya-hub-proxy-report [--since "2 hours ago"] [--log /var/log/tuya-hub-proxy-monitor.log]
+
+Reads the service journal (needs root or the systemd-journal group) and the
+monitor log, and prints: current session age, number of dropped sessions and
+their reasons, failed connects by error code, unconfirmed sets, and events
+per sub-device.
+"""
+import argparse
+import collections
+import json
+import subprocess
+import time
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--since", default="24 hours ago")
+ap.add_argument("--log", default="/var/log/tuya-hub-proxy-monitor.log")
+ap.add_argument("--unit", default="tuya-hub-proxy")
+a = ap.parse_args()
+
+out = subprocess.run(["journalctl", "-u", a.unit, "--since", a.since, "--no-pager", "-o", "cat"],
+                     capture_output=True, text=True).stdout
+drops, connects, fails = [], 0, collections.Counter()
+events, polls = collections.Counter(), collections.Counter()
+unconfirmed, resends, restarts = 0, 0, 0
+names = {}
+for line in out.splitlines():
+    try:
+        d = json.loads(line)
+    except ValueError:
+        continue
+    msg = d.get("msg")
+    if msg == "fake device listening":
+        pass
+    elif msg == "proxy running":
+        restarts += 1
+    elif msg == "upstream connected":
+        connects += 1
+    elif msg == "upstream session dropped":
+        drops.append((d["ts"], d.get("reason"), d.get("session_age")))
+    elif msg == "upstream connect failed, retrying later":
+        fails[d.get("err")] += 1
+    elif msg == "dps from hub":
+        (events if d.get("push") else polls)[d.get("child")] += 1
+    elif msg == "set never confirmed by hub":
+        unconfirmed += 1
+    elif msg == "set not confirmed, re-sending":
+        resends += 1
+
+print(f"journal since: {a.since}")
+print(f"proxy (re)starts: {restarts}   sessions established: {connects}   dropped: {len(drops)}")
+for reason, n in collections.Counter(r for _, r, _ in drops).most_common():
+    print(f"  drop reason {reason}: {n}")
+if drops:
+    ages = [x for *_, x in drops if x is not None]
+    if ages:
+        print(f"  session age at drop: min {min(ages):.0f}s  avg {sum(ages)/len(ages):.0f}s  max {max(ages):.0f}s")
+    print("  last drops: " + ", ".join(f"{t[11:19]} {r}" for t, r, _ in drops[-5:]))
+print("failed connects by code: " + (", ".join(f"{k}: {v}" for k, v in fails.items()) or "none"))
+print(f"sets re-sent: {resends}   sets never confirmed: {unconfirmed}")
+
+try:
+    with open(a.log) as fh:
+        last = json.loads(fh.readlines()[-1])
+    print(f"\nlatest monitor sample ({last['ts']}): state={last['state']} "
+          f"session_age={last.get('session_age')}s clients={last.get('clients')} errors={last.get('errors')}")
+    lp = last.get("last_push", {})
+except (OSError, IndexError, ValueError):
+    lp = {}
+    print("\nno monitor samples yet")
+
+print("\nevents per sub-device (pushes / poll answers / last push):")
+keys = set(events) | set(polls)
+for child in sorted(keys):
+    print(f"  {child}: {events[child]} / {polls[child]}")
+for name, ts in sorted(lp.items()):
+    age = f"{(time.time() - ts) / 60:.0f} min ago" if ts else "never"
+    print(f"  {name}: last push {age}")

@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""Append one JSON line with the proxy's health snapshot to a log file.
+
+Run every minute from tuya-hub-proxy-monitor.timer.  No secrets are written:
+the health endpoint never exposes keys.
+"""
+import json
+import sys
+import time
+import urllib.request
+
+URL = "http://127.0.0.1:8765/health"
+LOG = sys.argv[1] if len(sys.argv) > 1 else "/var/log/tuya-hub-proxy-monitor.log"
+
+rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "epoch": int(time.time())}
+try:
+    try:
+        raw = urllib.request.urlopen(URL, timeout=5).read()
+    except urllib.error.HTTPError as exc:  # 503 while the hub is down still has a body
+        raw = exc.read()
+    d = json.loads(raw)
+    u = d["upstream"]
+    rec.update({
+        "state": u["state"],
+        "connects": u["connects"],
+        "disconnects": u["disconnects"],
+        "errors": u["errors"],
+        "last_error": u["last_error"],
+        "session_age": round(time.time() - u["connected_since"]) if u["state"] == "connected" else 0,
+        "clients": sum(c["clients"] for c in d["children"].values()),
+        "last_push": {name: int(c["last_push"]) for name, c in d["children"].items()},
+    })
+except Exception as exc:  # proxy down
+    rec.update({"state": "proxy-unreachable", "error": str(exc)})
+with open(LOG, "a") as fh:
+    fh.write(json.dumps(rec, ensure_ascii=False) + "\n")

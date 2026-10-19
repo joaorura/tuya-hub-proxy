@@ -112,6 +112,22 @@ also carries libvirt VMs this detaches their `vnetN` taps — re-attach with
 `kind` controls the announced defaults: `door_sensor` (DP 101), `switch`
 (DP 1) or `generic` (none). Extra `defaults` can be set per child.
 
+### Optional: long-running monitor
+
+`contrib/monitor/` has a minute-by-minute health sampler (systemd timer) and a
+report script:
+
+```bash
+sudo install -m 0755 contrib/monitor/tuya-hub-proxy-monitor contrib/monitor/tuya-hub-proxy-report /usr/local/bin/
+sudo install -m 0644 contrib/monitor/tuya-hub-proxy-monitor.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now tuya-hub-proxy-monitor.timer
+sudo tuya-hub-proxy-report --since "24 hours ago"
+```
+
+The report shows dropped sessions and their reasons, failed connects by error
+code, unconfirmed commands and events per sub-device; raw samples are in
+`/var/log/tuya-hub-proxy-monitor.log` (one JSON line per minute).
+
 ## Adding the devices to tuya-local
 
 For each child, add a tuya-local device **manually** (not via the cloud):

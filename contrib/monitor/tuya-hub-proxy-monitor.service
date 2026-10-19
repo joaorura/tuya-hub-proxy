@@ -1,0 +1,6 @@
+[Unit]
+Description=Record a tuya-hub-proxy health sample
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/tuya-hub-proxy-monitor /var/log/tuya-hub-proxy-monitor.log
