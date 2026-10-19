@@ -139,6 +139,9 @@ class _Conn:
                 if cid in gw.children:
                     self.send_json(m.cmd, m.seqno, {"cid": cid, "dps": gw.children[cid]})
             elif m.cmd in (CT.CONTROL_NEW, CT.CONTROL):
+                if gw.ignore_controls > 0:
+                    gw.ignore_controls -= 1
+                    continue
                 inner = data.get("data", data)
                 cid, dps = inner.get("cid"), inner.get("dps", {})
                 self.send(m.cmd, m.seqno, None)  # empty ack
@@ -161,6 +164,7 @@ class MockGateway:
         self.negotiations = 0
         self.reject_negotiations = 0
         self.answer_heartbeats = True
+        self.ignore_controls = 0  # silently drop the next N control commands
         self.mute = False  # keep the socket open but never answer anything
         self.received: list[tuple[int, dict]] = []
         self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

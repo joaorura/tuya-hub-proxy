@@ -312,3 +312,25 @@ def test_probe_never_targets_a_child_that_only_pushes(gateway, tmp_path):
             await proxy.stop()
 
     run(scenario())
+
+
+def test_unconfirmed_set_is_resent(gateway, tmp_path):
+    """A control the hub swallows (deaf session) is re-sent until confirmed."""
+    gateway.ignore_controls = 1
+
+    async def scenario():
+        proxy = Proxy(make_config(gateway.port, tmp_path), confirm_timeout=0.5)
+        await proxy.start()
+        try:
+            assert await wait_until(lambda: proxy.upstream.connected, 5)
+            ok = await proxy.set_dps(SWITCH_ID, {"1": True})
+            assert ok is True
+            assert await wait_until(lambda: gateway.children[SWITCH_CID]["1"] is True, 5)
+            sent = [d for c, d in gateway.received if c == CT.CONTROL_NEW]
+            assert len(sent) == 2
+            await asyncio.sleep(1.5)  # confirmed: no further re-sends
+            assert len([d for c, d in gateway.received if c == CT.CONTROL_NEW]) == 2
+        finally:
+            await proxy.stop()
+
+    run(scenario())

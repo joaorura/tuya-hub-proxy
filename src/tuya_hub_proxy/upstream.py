@@ -102,6 +102,8 @@ class Upstream:
         backoff_914: float = 10.0,
         quiet_after: float = 15.0,
         probe_timeout: float = 10.0,
+        confirm_timeout: float = 8.0,
+        set_retries: int = 2,
         device_factory: Callable[..., Any] = tinytuya.Device,
     ) -> None:
         self._hub = hub
@@ -116,6 +118,8 @@ class Upstream:
         self._backoff_914 = backoff_914
         self._quiet_after = quiet_after
         self._probe_timeout = probe_timeout
+        self._confirm_timeout = confirm_timeout
+        self._set_retries = set_retries
         self._factory = device_factory
 
         self.stats = UpstreamStats()
@@ -141,6 +145,8 @@ class Upstream:
         self._unreliable: set[str] = set()  # children that left a probe unanswered
         self._probe_target: str | None = None
         self._probe_retried = False
+        # child_id -> (dps, sent_at, tries) for sets awaiting the hub's report
+        self._unconfirmed: dict[str, tuple[dict[str, Any], float, int]] = {}
 
     # ------------------------------------------------------------------ API
     def start(self) -> None:
@@ -439,6 +445,8 @@ class Upstream:
                 cmd.future.set_exception(exc)
 
     def _process_commands(self) -> None:
+        if self._gw is not None:
+            self._check_unconfirmed()
         while self._gw is not None:
             try:
                 cmd = self._cmds.get_nowait()
@@ -471,6 +479,32 @@ class Upstream:
             cmd.future.set_exception(UpstreamError("hub connection lost"))
             return
         cmd.future.set_result(True)
+        prev = self._unconfirmed.get(cmd.child_id)
+        tries = prev[2] + 1 if prev and prev[0] == cmd.dps else 1
+        self._unconfirmed[cmd.child_id] = (dict(cmd.dps), time.monotonic(), tries)
+
+    def _check_unconfirmed(self) -> None:
+        """Re-send a set the gateway never confirmed.
+
+        The gateway sometimes goes deaf for up to ~30 s before closing the
+        session; a command written in that window is silently lost.  Sets are
+        idempotent (absolute values, never toggles), so re-sending is safe.
+        """
+        now = time.monotonic()
+        for child_id, (dps, sent, tries) in list(self._unconfirmed.items()):
+            if now - sent < self._confirm_timeout:
+                continue
+            if tries > self._set_retries:
+                del self._unconfirmed[child_id]
+                log.warning("set never confirmed by hub", extra={"child": child_id, "dps": dps})
+                continue
+            log.info("set not confirmed, re-sending", extra={"child": child_id, "try": tries + 1})
+            self._do_set(_Command("set", child_id, dps, now + self._confirm_timeout))
+
+    def _confirm(self, child_id: str, dps: dict[str, Any]) -> None:
+        pending = self._unconfirmed.get(child_id)
+        if pending and all(str(k) in dps and dps[str(k)] == v for k, v in pending[0].items()):
+            del self._unconfirmed[child_id]
 
     def _do_refresh(self, child_id: str) -> bool:
         """Send a status query for one child without waiting for the answer.
@@ -539,5 +573,7 @@ class Upstream:
             self._responsive.add(child_id)
             if child_id == self._probe_target:
                 self._unreliable.discard(child_id)
-        self._on_dps(child_id, {str(k): v for k, v in dps.items()}, is_push)
+        dps = {str(k): v for k, v in dps.items()}
+        self._confirm(child_id, dps)
+        self._on_dps(child_id, dps, is_push)
         return True
