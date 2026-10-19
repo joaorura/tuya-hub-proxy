@@ -125,6 +125,7 @@ class Upstream:
         self._last_hb = 0.0
         self._pending_refresh: set[str] = set()
         self._awaiting_status: set[str] = set()  # children with a query in flight
+        self._op = "idle"  # last tinytuya operation, for diagnostics
 
     # ------------------------------------------------------------------ API
     def start(self) -> None:
@@ -266,7 +267,14 @@ class Upstream:
     def _drop(self, reason: str) -> None:
         if self._gw is None:
             return
-        log.warning("upstream session dropped", extra={"reason": reason})
+        now = time.time()
+        log.warning("upstream session dropped", extra={
+            "reason": reason,
+            "session_age": round(now - self.stats.connected_since, 1),
+            "since_rx": round(now - self.stats.last_rx, 1),
+            "since_hb": round(time.monotonic() - self._last_hb, 1),
+            "during": self._op,
+        })
         self._close()
         self.stats.disconnects += 1
         self.stats.consecutive_failures += 1
@@ -321,6 +329,7 @@ class Upstream:
         now = time.monotonic()
         if now - self._last_hb >= self._hb_interval:
             self._last_hb = now
+            self._op = "heartbeat"
             self._handle_result(gw.heartbeat(nowait=True), None)
             if not self._check_socket():
                 return
@@ -338,7 +347,11 @@ class Upstream:
                 self._drain_wake()
             if gw.socket not in r:
                 return
+        self._op = "receive"
         result = gw.receive()
+        for m in gw.raw_recv:
+            if not m.payload:
+                log.debug("hub empty frame", extra={"cmd": m.cmd, "retcode": m.retcode})
         if gw.raw_recv:
             self.stats.last_rx = time.time()
         self._handle_result(result, None)
@@ -390,6 +403,7 @@ class Upstream:
         log.info("upstream set", extra={"child": cmd.child_id, "dps": cmd.dps})
         # nowait: the hub answers with an ack + a STATUS push, both of which
         # arrive through the receive loop like any other push.
+        self._op = "set"
         res = kid.set_multiple_values(cmd.dps, nowait=True)
         if isinstance(res, dict) and "Err" in res:
             self._record_error(str(res["Err"]), res.get("Error", "set failed"))
@@ -414,6 +428,7 @@ class Upstream:
         kid = self._kids.get(child_id)
         if kid is None:
             return False
+        self._op = "status_query"
         res = kid.status(nowait=True)
         if isinstance(res, dict) and "Err" in res:
             self._handle_result(res, child_id)
@@ -434,7 +449,10 @@ class Upstream:
             if code in LINK_ERRORS:
                 self._drop(code)
             else:
-                log.info("hub returned error", extra={"err": code, "child": expected_child})
+                payload = result.get("Payload")
+                log.info("hub returned error", extra={
+                    "err": code, "child": expected_child,
+                    "payload": str(payload)[:160] if payload else None})
             return False
 
         data = result.get("data") if isinstance(result.get("data"), dict) else {}
