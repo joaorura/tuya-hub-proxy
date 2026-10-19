@@ -289,3 +289,26 @@ def test_event_after_unanswered_query_is_still_a_push(gateway, tmp_path, monkeyp
             await proxy.stop()
 
     run(scenario())
+
+
+def test_probe_never_targets_a_child_that_only_pushes(gateway, tmp_path):
+    """Sleeping sensors push events but ignore queries: probing one would
+    drop a healthy session."""
+    gateway.answer_heartbeats = False
+    gateway.silent.add(DOOR_CID)
+
+    async def scenario():
+        proxy = _fast_watchdog_proxy(gateway, tmp_path)
+        await proxy.start()
+        try:
+            assert await wait_until(lambda: proxy.upstream.connected, 5)
+            for _ in range(4):
+                gateway.push(DOOR_CID, {"101": True})
+                await asyncio.sleep(1.2)
+            await asyncio.sleep(4)
+            assert proxy.upstream.stats.disconnects == 0
+            assert gateway.connections_total == 1
+        finally:
+            await proxy.stop()
+
+    run(scenario())

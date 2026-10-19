@@ -138,6 +138,9 @@ class Upstream:
         self._op = "idle"  # last tinytuya operation, for diagnostics
         self._probe_at = 0.0  # when the current liveness probe was sent
         self._responsive: set[str] = set()  # children that answered status queries
+        self._unreliable: set[str] = set()  # children that left a probe unanswered
+        self._probe_target: str | None = None
+        self._probe_retried = False
 
     # ------------------------------------------------------------------ API
     def start(self) -> None:
@@ -372,24 +375,43 @@ class Upstream:
     def _liveness_ok(self) -> bool:
         """Silence alone is not a dead session: some gateways never answer
         heartbeats.  After a quiet period, probe with a status query to a child
-        that has answered before, and only drop if the probe goes unanswered.
+        that has answered queries before.  If the probe goes unanswered, that
+        child is marked unreliable and one other child is tried; the session
+        is dropped only when no candidate answers.
         """
         now = time.time()
         if self._probe_at and self.stats.last_rx >= self._probe_at:
             self._probe_at = 0.0  # probe (or anything else) answered
+            self._probe_retried = False
         if self._probe_at:
-            if now - self._probe_at > self._probe_timeout:
-                self._probe_at = 0.0
-                self._drop("liveness probe unanswered")
-                return False
-            return True
+            if now - self._probe_at <= self._probe_timeout:
+                return True
+            missed = self._probe_target
+            self._probe_at = 0.0
+            if missed:
+                self._responsive.discard(missed)
+                self._unreliable.add(missed)
+            target = self._probe_candidate()
+            if target and not self._probe_retried:
+                self._probe_retried = True
+                return self._send_probe(target, now)
+            self._probe_retried = False
+            self._drop("liveness probe unanswered")
+            return False
         if now - self.stats.last_rx > self._quiet_after:
-            target = next(iter(self._responsive), None) or next(iter(self._child_to_cid))
-            log.debug("hub quiet, probing", extra={"child": target})
-            self._probe_at = now
-            self._do_refresh(target)
-            return self._gw is not None
+            target = self._probe_candidate() or next(iter(self._child_to_cid))
+            return self._send_probe(target, now)
         return True
+
+    def _probe_candidate(self) -> str | None:
+        return next((c for c in self._responsive if c not in self._unreliable), None)
+
+    def _send_probe(self, target: str, now: float) -> bool:
+        log.debug("hub quiet, probing", extra={"child": target})
+        self._probe_at = now
+        self._probe_target = target
+        self._do_refresh(target)
+        return self._gw is not None
 
     def _expire_commands(self) -> None:
         keep: list[_Command] = []
@@ -512,6 +534,10 @@ class Upstream:
         sent = self._awaiting_status.pop(child_id, None)
         awaited = sent is not None and time.monotonic() - sent < STATUS_REPLY_WINDOW
         is_push = child_id != expected_child and not awaited
-        self._responsive.add(child_id)
+        if awaited or child_id == expected_child:
+            # it answers status queries, so it is a valid liveness probe target
+            self._responsive.add(child_id)
+            if child_id == self._probe_target:
+                self._unreliable.discard(child_id)
         self._on_dps(child_id, {str(k): v for k, v in dps.items()}, is_push)
         return True
