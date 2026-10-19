@@ -20,8 +20,10 @@ jobs:
         run: python -m pip install -e ".[test]"
       - name: Fetch tuya-local for the integration test (3.14 only)
         if: matrix.python-version == '3.14'
+        env:
+          TUYA_LOCAL_REF: 2026.9.2-rel  # pinned release; bump deliberately
         run: |
-          git clone --depth 1 https://github.com/make-all/tuya-local.git "$RUNNER_TEMP/tuya-local"
+          git clone --depth 1 --branch "$TUYA_LOCAL_REF" https://github.com/make-all/tuya-local.git "$RUNNER_TEMP/tuya-local"
           echo "TUYA_LOCAL_PATH=$RUNNER_TEMP/tuya-local" >> "$GITHUB_ENV"
       - name: Test
         run: python -m pytest -v

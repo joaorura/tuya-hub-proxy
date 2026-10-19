@@ -71,6 +71,14 @@ def _import_device_module():
     return importlib.import_module("custom_components.tuya_local.device")
 
 
+def _is_door_sensor_on_dp101(config) -> bool:
+    for ent in config.all_entities():
+        if ent.entity == "binary_sensor" and ent.device_class == "door" and \
+                any(str(dp.id) == "101" for dp in ent.dps()):
+            return True
+    return False
+
+
 class FakeHass:
     def __init__(self) -> None:
         self.data = {"tuya_local": {}}
@@ -123,9 +131,11 @@ def test_tuya_local_device_against_proxy(gateway, tmp_path):
             assert door.get_property("101") is False
             assert door.get_property("103") == 87
 
-            # config-flow style type detection picks the Zigbee door sensor
-            names = {c.config_type for c in await door.async_possible_types()}
-            assert "tuya_smart_zigbee_door_sensor" in names
+            # config-flow style type detection offers a door sensor driven by DP 101.
+            # Match on content, not on the yaml file name (upstream renames them).
+            possible = await door.async_possible_types()
+            assert any(_is_door_sensor_on_dp101(c) for c in possible), \
+                sorted(c.config_type for c in possible)
 
             # persistent receive loop gets hub pushes
             ent = FakeEntity()
