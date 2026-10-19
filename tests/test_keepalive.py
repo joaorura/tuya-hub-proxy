@@ -178,3 +178,47 @@ def test_fake_devices_unavailable_while_hub_down_and_back_after(gateway, tmp_pat
             await proxy.stop()
 
     run(scenario())
+
+
+def test_debug_log_shows_frames_without_any_key(gateway, tmp_path, capsys):
+    """log_level DEBUG must describe every frame (cmd, retcode, the probe it
+    may answer) and still never print the local key or the session key."""
+    import json
+    import logging
+
+    from conftest import DOOR_KEY, HUB_KEY, SWITCH_KEY
+
+    from tuya_hub_proxy.logsetup import setup_logging
+
+    gateway.answer_heartbeats = False
+    root = logging.getLogger()
+    saved = root.handlers[:], root.level
+    setup_logging("DEBUG", "json")
+
+    async def scenario():
+        proxy = _proxy(gateway, tmp_path)
+        await proxy.start()
+        try:
+            assert await wait_until(lambda: proxy.upstream.connected, 5)
+            gateway.push(SWITCH_CID, {"1": True})
+            await asyncio.sleep(3)
+            return [c.key for c in gateway.conns]
+        finally:
+            await proxy.stop()
+
+    try:
+        session_keys = run(scenario())
+    finally:
+        root.handlers[:], level = saved
+        root.setLevel(level)
+    out = capsys.readouterr().out
+    lines = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+    frames = [r for r in lines if r["msg"] == "hub frame"]
+    assert frames and all({"cmd", "retcode", "payload_len", "probe"} <= set(r) for r in frames)
+    msgs = [r for r in lines if r["msg"] == "hub message"]
+    assert any(r["cid"] == SWITCH_CID and r["dps"] == {"1": True} for r in msgs)
+    assert any(r["cid"] is None and r["probe"] == GATEWAY for r in msgs)
+    for secret in (HUB_KEY, DOOR_KEY, SWITCH_KEY):
+        assert secret not in out
+    for key in session_keys:
+        assert key.hex() not in out and repr(key) not in out

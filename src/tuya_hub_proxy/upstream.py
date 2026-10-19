@@ -430,8 +430,10 @@ class Upstream:
         self._op = "receive"
         result = gw.receive()
         for m in gw.raw_recv:
-            if not m.payload:
-                log.debug("hub empty frame", extra={"cmd": m.cmd, "retcode": m.retcode})
+            # header fields only: the payload is never logged
+            log.debug("hub frame", extra={
+                "cmd": m.cmd, "seq": m.seqno, "retcode": m.retcode,
+                "payload_len": len(m.payload or b""), **self._probe_context()})
         if gw.raw_recv:
             self.stats.last_rx = time.time()
         self._handle_result(result, None)
@@ -470,6 +472,13 @@ class Upstream:
         if now - self._last_exchange > self._quiet_after:
             return self._send_probe(self._next_target(), now)
         return True
+
+    def _probe_context(self) -> dict[str, Any]:
+        """The outstanding probe, for DEBUG lines about incoming data."""
+        if not self._probe_at:
+            return {"probe": None}
+        return {"probe": self._probe_target,
+                "probe_age": round(time.time() - self._probe_at, 1)}
 
     def _session_dead(self) -> bool:
         streak = self._fail_streak
@@ -707,6 +716,8 @@ class Upstream:
         if not cid and dev is not None:
             cid = getattr(dev, "cid", None)
         dps = result.get("dps") or data.get("dps")
+        log.debug("hub message", extra={
+            "cid": cid, "dps": dps, "keys": sorted(result), **self._probe_context()})
         now = time.time()
         self._signal(GATEWAY, now)
         if not cid:
