@@ -222,3 +222,51 @@ def test_debug_log_shows_frames_without_any_key(gateway, tmp_path, capsys):
         assert secret not in out
     for key in session_keys:
         assert key.hex() not in out and repr(key) not in out
+
+
+def _bare_upstream(tmp_path, **opts):
+    from tuya_hub_proxy.upstream import Upstream
+
+    cfg = make_config(1, tmp_path)
+    got = []
+    up = Upstream(cfg.hub, {SWITCH_ID: SWITCH_CID, DOOR_ID: DOOR_CID},
+                  lambda child, dps, push: got.append((child, dps, push)), **opts)
+    return up, got
+
+
+def test_late_status_answer_proves_the_hub_alive(tmp_path):
+    """Seen on the real hub: it answers in order but 10-40 s late.  A child's
+    answer arriving after its probe timed out must still reset the failure
+    streak, or the next unanswered gateway probe drops a live session."""
+    import time
+
+    up, got = _bare_upstream(tmp_path, probe_timeout=10.0)
+    up._gw = object()
+    # the child was probed 16 s ago and timed out; now the gateway is probed
+    up._awaiting_status[SWITCH_ID] = time.monotonic() - 16
+    up._fail_streak = [SWITCH_ID]
+    up._probe_target, up._probe_at = GATEWAY, time.time() - 5
+    up._last_exchange = time.time() - 30
+    assert up._handle_result({"cid": SWITCH_CID, "dps": {"1": False}}, None)
+    assert up._fail_streak == []
+    assert time.time() - up._last_exchange < 1
+    assert up._probe_at  # the gateway probe itself is still outstanding
+    assert got == [(SWITCH_ID, {"1": False}, True)]  # too late to be the reply
+    up._probe_missed(time.time())
+    assert not up._session_dead()
+    up.stop()
+
+
+def test_probe_answer_after_reply_window_settles_the_probe(tmp_path):
+    """The probed child answers 5.9 s later: past the 5 s push window but
+    within probe_timeout, so the probe is answered, not missed."""
+    import time
+
+    up, _ = _bare_upstream(tmp_path, probe_timeout=10.0)
+    up._gw = object()
+    up._awaiting_status[SWITCH_ID] = time.monotonic() - 5.9
+    up._probe_target, up._probe_at = SWITCH_ID, time.time() - 5.9
+    up._handle_result({"cid": SWITCH_CID, "dps": {"1": True}}, None)
+    assert up._probe_at == 0.0
+    assert up.keepalive_snapshot()["targets"][SWITCH_ID]["last_probe_ok"] > 0
+    up.stop()

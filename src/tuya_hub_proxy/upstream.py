@@ -38,8 +38,15 @@ log = logging.getLogger(__name__)
 LINK_ERRORS = {"901", "902", "905", "906", "914"}
 ERR_KEY_OR_VER = "914"
 
-#: How long after a status query an incoming report counts as its answer.
+#: How long after a status query an incoming report counts as its answer
+#: (and so is not forwarded as a push).
 STATUS_REPLY_WINDOW = 5.0
+
+#: How long after a status query a report from that child still proves the
+#: hub is processing our requests.  The gateway answers in order but, when
+#: its Zigbee side is busy, 10-40 s late; such a late answer is a liveness
+#: signal even though it no longer counts as the reply to the query.
+LATE_REPLY_WINDOW = 60.0
 
 #: Name of the gateway itself in the keepalive rotation and the health output.
 GATEWAY = "gateway"
@@ -736,9 +743,12 @@ class Upstream:
         self._signal(child_id, now)
         # A reply to our own status query is not a push; everything else is.
         sent = self._awaiting_status.pop(child_id, None)
-        awaited = sent is not None and time.monotonic() - sent < STATUS_REPLY_WINDOW
+        age = time.monotonic() - sent if sent is not None else None
+        awaited = age is not None and age < STATUS_REPLY_WINDOW
         is_push = child_id != expected_child and not awaited
-        if awaited or child_id == expected_child:
+        if (age is not None and age < LATE_REPLY_WINDOW) or child_id == expected_child:
+            if not awaited and child_id != expected_child:
+                log.debug("late status answer", extra={"child": child_id, "age": round(age, 1)})
             # it answers status queries, so it is a valid keepalive target
             self._join_rotation(child_id)
             self._probe_answered(child_id, now)
