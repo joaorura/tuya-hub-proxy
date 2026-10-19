@@ -1,0 +1,44 @@
+# tuya-hub-proxy example configuration.
+# Copy to /etc/tuya-hub-proxy/config.yaml (mode 0600) and fill in REAL values
+# there -- never commit the real file.  All ids, keys and IPs below are fake.
+# Tip: `tuya-hub-proxy-genconfig` builds this file from a tinytuya devices.json.
+
+hub:
+  device_id: bf00000000000000hub001     # gateway device id
+  ip: 192.0.2.10                        # gateway LAN IP (give it a DHCP reservation)
+  local_key: "REPLACE_ME_16_CHR"        # gateway local key (16 chars)
+  version: 3.4
+  # Alternatively read ip/local_key from a tinytuya devices.json at runtime:
+  # devices_json: /path/to/devices.json
+
+proxy:
+  listen_port: 6668                     # every fake device listens on <bind_ip>:6668
+  cache_file: /var/lib/tuya-hub-proxy/cache.json
+  health_host: 127.0.0.1
+  health_port: 8765
+  heartbeat_interval: 10                # seconds between heartbeats to the hub
+  refresh_interval: 300                 # min seconds between status polls of one child
+  command_timeout: 10                   # how long a command waits for the hub to come back
+  backoff_min: 2
+  backoff_max: 300
+  backoff_914: 10                       # min wait after a failed session negotiation
+  log_level: INFO
+  log_format: json                      # json | text
+
+children:
+  # One entry per Zigbee sub-device.  bind_ip must be a free, static address
+  # OUTSIDE your router's DHCP pool; fake_local_key is invented by you
+  # (16 chars) and is what you type into tuya-local.
+  - name: Front door
+    device_id: bf00000000000000door01   # the sub-device's own device id
+    node_id: "0000000000000001"         # its node_id / cid on the gateway
+    bind_ip: 192.0.2.20
+    fake_local_key: "FakeKey-Door0001"
+    kind: door_sensor                   # door_sensor | switch | generic
+  - name: Hall light
+    device_id: bf00000000000000swit02
+    node_id: "0000000000000002"
+    bind_ip: 192.0.2.21
+    fake_local_key: "FakeKey-Swtch002"
+    kind: switch
+    # defaults: {"1": false}            # optional extra DPs to announce before the hub reports them

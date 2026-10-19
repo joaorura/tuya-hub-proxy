@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tuya-hub-proxy"
+version = "0.1.0"
+description = "Expose Tuya Zigbee gateway sub-devices as stand-alone protocol 3.3 devices for Home Assistant's tuya-local"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+  "tinytuya>=1.20,<1.21",
+  "cryptography>=3.1",
+  "PyYAML>=6",
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Topic :: Home Automation",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+tuya-hub-proxy = "tuya_hub_proxy.main:main"
+tuya-hub-proxy-genconfig = "tuya_hub_proxy.genconfig:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

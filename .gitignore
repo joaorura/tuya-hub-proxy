@@ -1,0 +1,21 @@
+# real configuration and runtime state -- never commit
+config.yaml
+config.yml
+config.json
+*.local.yaml
+devices.json
+tinytuya.json
+snapshot.json
+cache/
+cache.json
+*.state.json
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv*/
+venv/
+build/
+dist/
+.pytest_cache/
+.coverage

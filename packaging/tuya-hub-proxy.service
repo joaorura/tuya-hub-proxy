@@ -1,0 +1,33 @@
+[Unit]
+Description=tuya-hub-proxy (Tuya Zigbee gateway -> stand-alone 3.3 devices)
+Documentation=https://github.com/OWNER/tuya-hub-proxy
+Wants=network-online.target
+After=network-online.target NetworkManager-wait-online.service
+
+[Service]
+Type=simple
+# The config holds the hub local key: keep it 0600 root-owned and hand it to
+# the unprivileged dynamic user through systemd credentials.
+LoadCredential=config.yaml:/etc/tuya-hub-proxy/config.yaml
+ExecStart=/opt/tuya-hub-proxy/venv/bin/tuya-hub-proxy -c ${CREDENTIALS_DIRECTORY}/config.yaml
+DynamicUser=yes
+StateDirectory=tuya-hub-proxy
+Restart=on-failure
+RestartSec=5
+
+# hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
