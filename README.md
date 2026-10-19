@@ -63,10 +63,30 @@ integration ends up in a 914 loop where no device works. See tuya-local issues
   `false` for door sensors) is announced until the hub reports the real value,
   so tuya-local can detect the device type even for a sensor that has not sent
   an event yet.
+* **Keepalive** — the gateway ignores heartbeats and closes a session that
+  has carried no request it recognises for ~30 s. After `quiet_after` seconds
+  without an answer to anything the proxy sent, a status query goes to the
+  next target of a rotation: the gateway itself (a query without `cid`, which
+  it answers with its own DPs) every `gateway_probe_every` cycles, and the
+  children that answer queries in between. One unanswered probe never drops
+  the session (a switch may simply be unpowered): the session is declared
+  dead only when consecutive probes fail on two distinct targets one of which
+  is the gateway, or after `probe_fail_limit` consecutive failures. A child
+  that misses `probe_miss_limit` probes in a row leaves the rotation, and one
+  the hub answers with error 900 (a sleeping sensor) is marked "not
+  probeable"; both keep receiving their pushes and rejoin as soon as they
+  answer a query again.
+* **Unavailability** — while the hub session has been down for more than
+  `unavailable_after` seconds (default 120, `0` disables), the fake devices
+  close their clients and refuse new connections, so tuya-local shows the
+  entities as *unavailable* instead of serving stale values. They listen
+  again as soon as the session is back.
 * **Observability** — JSON logs on stdout (journald), and
-  `GET http://127.0.0.1:8765/health` with upstream state, per-child last
-  update/push, connected clients and error counters (503 while the hub is down).
-  Keys are never logged.
+  `GET http://127.0.0.1:8765/health` with upstream state (session age, drops
+  by reason), keepalive state (rotation, last signal and last answered probe
+  for the gateway and each child), per-child last update/push, connected
+  clients and error counters (503 while the hub is down). Keys are never
+  logged.
 
 ## Requirements
 
@@ -173,8 +193,10 @@ switch* (DP 1) for single-gang switches.
   far — field reports welcome.
 * Observed gateway behaviour the proxy accounts for: it answers status queries
   for a sleeping sub-device with error 900 `json obj data unvalid`, it does
-  not answer heartbeats (liveness is checked with a status probe instead), and
-  it may refuse new connections for a few seconds right after a session ends.
+  not answer heartbeats (it answers a status query addressed to itself, which
+  is what the keepalive relies on), it closes a session after ~30 s without a
+  request it recognises, and it may refuse new connections for a few seconds
+  right after a session ends.
 
 ## Development
 

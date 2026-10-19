@@ -29,6 +29,7 @@ class Proxy:
         self._last_refresh: dict[str, float] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self.started_at = time.time()
+        self.available = True  # fake devices accept clients
         for c in cfg.children:
             self.cache.register(c.device_id, c.defaults)
         self.cache.load()
@@ -43,6 +44,9 @@ class Proxy:
             backoff_914=cfg.backoff_914,
             quiet_after=cfg.quiet_after,
             probe_timeout=cfg.probe_timeout,
+            gateway_probe_every=cfg.gateway_probe_every,
+            probe_fail_limit=cfg.probe_fail_limit,
+            probe_miss_limit=cfg.probe_miss_limit,
             **upstream_kwargs,
         )
 
@@ -56,9 +60,11 @@ class Proxy:
             self.fakes[c.device_id] = fake
         self.upstream.start()
         self._saver = asyncio.create_task(self._save_loop())
+        self._watch = asyncio.create_task(self._availability_loop())
 
     async def stop(self) -> None:
         self._saver.cancel()
+        self._watch.cancel()
         for fake in self.fakes.values():
             await fake.stop()
         await asyncio.to_thread(self.upstream.stop)
@@ -68,6 +74,37 @@ class Proxy:
         while True:
             await asyncio.sleep(5)
             self.cache.maybe_save()
+
+    async def _availability_loop(self) -> None:
+        """Take the fake devices offline while the hub session stays down.
+
+        Answering from cache forever would show stale values as if they were
+        live.  After ``unavailable_after`` seconds without a hub session the
+        fakes drop their clients and stop listening (connection refused), so
+        tuya-local marks the entities unavailable; they come back as soon as
+        the session is re-established.
+        """
+        limit = self.cfg.unavailable_after
+        if not limit or limit <= 0:
+            return
+        step = min(1.0, limit / 4)
+        while True:
+            await asyncio.sleep(step)
+            down = self.upstream.down_for()
+            want = down <= limit
+            if want == self.available:
+                continue
+            self.available = want
+            if want:
+                log.warning("hub back, fake devices available again")
+            else:
+                log.warning("hub down, fake devices unavailable", extra={"down_for": round(down, 1)})
+            for fake in self.fakes.values():
+                try:
+                    await fake.set_available(want)
+                except OSError as exc:
+                    log.warning("could not change fake device availability",
+                                extra={"child": fake.name, "error": str(exc)})
 
     # ------------------------------------------------- upstream -> clients
     def _on_dps_threadsafe(self, child_id: str, dps: dict[str, Any], is_push: bool) -> None:
@@ -111,9 +148,18 @@ class Proxy:
     # ------------------------------------------------------------- health
     def health(self) -> dict[str, Any]:
         children = {}
+        ka = self.upstream.keepalive_snapshot()
+        targets = ka.pop("targets")
+        names = {c.device_id: c.name for c in self.cfg.children}
+        ka["rotation"] = [names.get(t, t) for t in ka["rotation"]]
+        ka["fail_streak"] = [names.get(t, t) for t in ka["fail_streak"]]
+        if ka["probe_target"]:
+            ka["probe_target"] = names.get(ka["probe_target"], ka["probe_target"])
+        ka["gateway"] = targets.get("gateway", {})
         for c in self.cfg.children:
             st = self.cache.get(c.device_id)
             fake = self.fakes.get(c.device_id)
+            sig = targets.get(c.device_id, {})
             children[c.name] = {
                 "device_id": c.device_id,
                 "bind": f"{c.bind_ip}:{fake.port if fake else '?'}",
@@ -122,11 +168,18 @@ class Proxy:
                 "last_update": st.updated_at,
                 "last_push": st.last_push,
                 "counters": dict(fake.counters) if fake else {},
+                "last_signal": sig.get("last_signal", 0.0),
+                "last_probe_ok": sig.get("last_probe_ok", 0.0),
+                "keepalive": sig.get("keepalive"),
+                "probes": sig.get("probes", 0),
+                "probes_missed": sig.get("missed", 0),
             }
         up = self.upstream.stats.as_dict()
         return {
             "ok": up["state"] == "connected",
             "uptime": round(time.time() - self.started_at, 1),
+            "available": self.available,
             "upstream": up,
+            "keepalive": ka,
             "children": children,
         }

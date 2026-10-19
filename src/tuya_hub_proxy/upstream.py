@@ -41,6 +41,9 @@ ERR_KEY_OR_VER = "914"
 #: How long after a status query an incoming report counts as its answer.
 STATUS_REPLY_WINDOW = 5.0
 
+#: Name of the gateway itself in the keepalive rotation and the health output.
+GATEWAY = "gateway"
+
 DpsCallback = Callable[[str, dict[str, Any], bool], None]  # child_id, dps, is_push
 
 
@@ -69,6 +72,8 @@ class UpstreamStats:
     connected_since: float = 0.0
     next_retry_at: float = 0.0
     consecutive_failures: int = 0
+    down_since: float = field(default_factory=time.time)  # 0 while connected
+    drop_reasons: Counter = field(default_factory=Counter)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -80,8 +85,12 @@ class UpstreamStats:
             "last_error": self.last_error,
             "last_rx": self.last_rx,
             "connected_since": self.connected_since,
+            "session_age": (round(time.time() - self.connected_since, 1)
+                            if self.state == "connected" else 0),
+            "down_since": self.down_since,
             "next_retry_at": self.next_retry_at,
             "consecutive_failures": self.consecutive_failures,
+            "drop_reasons": dict(self.drop_reasons),
         }
 
 
@@ -102,6 +111,9 @@ class Upstream:
         backoff_914: float = 10.0,
         quiet_after: float = 15.0,
         probe_timeout: float = 10.0,
+        gateway_probe_every: int = 2,
+        probe_fail_limit: int = 3,
+        probe_miss_limit: int = 2,
         confirm_timeout: float = 8.0,
         set_retries: int = 2,
         device_factory: Callable[..., Any] = tinytuya.Device,
@@ -118,6 +130,9 @@ class Upstream:
         self._backoff_914 = backoff_914
         self._quiet_after = quiet_after
         self._probe_timeout = probe_timeout
+        self._gw_every = max(1, int(gateway_probe_every))
+        self._fail_limit = max(1, int(probe_fail_limit))
+        self._miss_limit = max(1, int(probe_miss_limit))
         self._confirm_timeout = confirm_timeout
         self._set_retries = set_retries
         self._factory = device_factory
@@ -140,11 +155,20 @@ class Upstream:
         # cid), so entries expire after STATUS_REPLY_WINDOW seconds.
         self._awaiting_status: dict[str, float] = {}
         self._op = "idle"  # last tinytuya operation, for diagnostics
-        self._probe_at = 0.0  # when the current liveness probe was sent
-        self._responsive: set[str] = set()  # children that answered status queries
-        self._unreliable: set[str] = set()  # children that left a probe unanswered
-        self._probe_target: str | None = None
-        self._probe_retried = False
+        # -- keepalive rotation (see _keepalive) --
+        self._probe_at = 0.0  # when the outstanding probe was sent (0 = none)
+        self._probe_target: str | None = None  # GATEWAY or a child id
+        self._rotation: list[str] = []  # children that answer status queries
+        self._rot_idx = 0
+        self._cycle = 0
+        self._unprobeable: set[str] = set()  # answer queries with 900 (sleepy sensors)
+        self._misses: Counter = Counter()  # consecutive unanswered probes per child
+        self._fail_streak: list[str] = []  # targets of consecutive unanswered probes
+        self._last_exchange = 0.0  # last answer to something we sent (time.time())
+        # target -> {"last_signal", "last_probe_ok", "probes", "missed"}
+        self._signals: dict[str, dict[str, Any]] = {
+            t: {"last_signal": 0.0, "last_probe_ok": 0.0, "probes": 0, "missed": 0}
+            for t in [GATEWAY, *self._child_to_cid]}
         # child_id -> (dps, sent_at, tries) for sets awaiting the hub's report
         self._unconfirmed: dict[str, tuple[dict[str, Any], float, int]] = {}
 
@@ -173,6 +197,34 @@ class Upstream:
 
     def refresh(self, child_id: str, timeout: float = 30.0) -> Future:
         return self._submit(_Command("refresh", child_id, None, time.monotonic() + timeout))
+
+    def down_for(self) -> float:
+        """Seconds the upstream session has been down (0 while connected)."""
+        if self.connected or not self.stats.down_since:
+            return 0.0
+        return max(0.0, time.time() - self.stats.down_since)
+
+    def keepalive_snapshot(self) -> dict[str, Any]:
+        """Keepalive state for /health (read from another thread: copies only)."""
+        signals = {k: dict(v) for k, v in dict(self._signals).items()}
+        rotation = list(self._rotation)
+        unprobeable = set(self._unprobeable)
+        for child_id, sig in signals.items():
+            if child_id == GATEWAY:
+                sig["keepalive"] = "always"
+            elif child_id in rotation:
+                sig["keepalive"] = "rotation"
+            elif child_id in unprobeable:
+                sig["keepalive"] = "not_probeable"
+            else:
+                sig["keepalive"] = "out"
+        return {
+            "rotation": [GATEWAY, *rotation],
+            "probe_target": self._probe_target if self._probe_at else None,
+            "fail_streak": list(self._fail_streak),
+            "last_exchange": self._last_exchange,
+            "targets": signals,
+        }
 
     # -------------------------------------------------------------- internals
     def _submit(self, cmd: _Command) -> Future:
@@ -258,10 +310,15 @@ class Upstream:
         self._gw, self._kids = gw, kids
         self._sock_id = id(gw.socket)
         self._probe_at = 0.0
+        self._probe_target = None
+        self._fail_streak = []
+        self._cycle = 0
+        self._last_exchange = time.time()
         self.stats.connects += 1
         self.stats.consecutive_failures = 0
         self.stats.state = "connected"
         self.stats.connected_since = time.time()
+        self.stats.down_since = 0.0
         self.stats.last_rx = time.time()
         self._last_hb = time.monotonic()
         log.info("upstream connected", extra={"hub_ip": hub.ip})
@@ -299,6 +356,8 @@ class Upstream:
         })
         self._close()
         self.stats.disconnects += 1
+        self.stats.drop_reasons[reason] += 1
+        self.stats.down_since = now
         self.stats.consecutive_failures += 1
         delay = self._backoff_delay()
         if reason == ERR_KEY_OR_VER:
@@ -355,8 +414,8 @@ class Upstream:
             self._handle_result(gw.heartbeat(nowait=True), None)
             if not self._check_socket():
                 return
-            if not self._liveness_ok():
-                return
+        if not self._keepalive():
+            return
         # Wait for hub data OR a command, whichever comes first.
         if not gw.received_wrong_cid_queue:
             try:
@@ -378,46 +437,125 @@ class Upstream:
         self._handle_result(result, None)
         self._check_socket()
 
-    def _liveness_ok(self) -> bool:
-        """Silence alone is not a dead session: some gateways never answer
-        heartbeats.  After a quiet period, probe with a status query to a child
-        that has answered queries before.  If the probe goes unanswered, that
-        child is marked unreliable and one other child is tried; the session
-        is dropped only when no candidate answers.
+    # -- keepalive / liveness ------------------------------------------------
+    def _keepalive(self) -> bool:
+        """Keep the hub session alive and detect a dead one.
+
+        The gateway ignores heartbeats and closes a session after ~30 s
+        without a request it recognises.  A status query does count, and the
+        gateway answers one addressed to itself (no cid) reliably.  So after
+        ``quiet_after`` seconds without an answer to anything we sent, the
+        next target of a rotation is queried: the gateway every
+        ``gateway_probe_every`` cycles, children that answer queries in
+        between.
+
+        An unanswered probe alone never drops the session (a child may be
+        unpowered).  The session is declared dead only when consecutive probes
+        fail on at least two distinct targets, one of them the gateway, or
+        when ``probe_fail_limit`` consecutive probes fail.
         """
         now = time.time()
-        if self._probe_at and self.stats.last_rx >= self._probe_at:
-            self._probe_at = 0.0  # probe (or anything else) answered
-            self._probe_retried = False
         if self._probe_at:
             if now - self._probe_at <= self._probe_timeout:
                 return True
-            missed = self._probe_target
-            self._probe_at = 0.0
-            if missed:
-                self._responsive.discard(missed)
-                self._unreliable.add(missed)
-            target = self._probe_candidate()
-            if target and not self._probe_retried:
-                self._probe_retried = True
-                return self._send_probe(target, now)
-            self._probe_retried = False
-            self._drop("liveness probe unanswered")
-            return False
-        if now - self.stats.last_rx > self._quiet_after:
-            target = self._probe_candidate() or next(iter(self._child_to_cid))
-            return self._send_probe(target, now)
+            self._probe_missed(now)
+            if self._session_dead():
+                streak = ",".join(self._fail_streak)
+                self._fail_streak = []
+                self._drop("keepalive probes unanswered")
+                log.warning("keepalive gave up", extra={"targets": streak})
+                return False
+            # try the next target right away
+            return self._send_probe(self._next_target(), now)
+        if now - self._last_exchange > self._quiet_after:
+            return self._send_probe(self._next_target(), now)
         return True
 
-    def _probe_candidate(self) -> str | None:
-        return next((c for c in self._responsive if c not in self._unreliable), None)
+    def _session_dead(self) -> bool:
+        streak = self._fail_streak
+        if len(streak) >= self._fail_limit:
+            return True
+        return GATEWAY in streak and len(set(streak)) >= 2
+
+    def _next_target(self) -> str:
+        self._cycle += 1
+        if not self._rotation or (self._cycle - 1) % self._gw_every == 0:
+            return GATEWAY
+        self._rot_idx %= len(self._rotation)
+        target = self._rotation[self._rot_idx]
+        self._rot_idx += 1
+        return target
 
     def _send_probe(self, target: str, now: float) -> bool:
-        log.debug("hub quiet, probing", extra={"child": target})
+        log.debug("keepalive probe", extra={"target": target})
         self._probe_at = now
         self._probe_target = target
+        sig = self._signals[target]
+        sig["probes"] += 1
+        if target == GATEWAY:
+            self._op = "gateway_query"
+            res = self._gw.status(nowait=True)
+            if isinstance(res, dict) and "Err" in res:
+                self._handle_result(res, None)
+                return self._gw is not None
+            return self._check_socket()
         self._do_refresh(target)
         return self._gw is not None
+
+    def _probe_answered(self, target: str, now: float) -> None:
+        """``target`` (GATEWAY or a child) answered a query we sent."""
+        self._signals[target]["last_probe_ok"] = now
+        if target != GATEWAY:
+            self._misses.pop(target, None)
+        if self._probe_target == target:
+            self._hub_answered(now)
+        else:
+            self._last_exchange = now
+            self._fail_streak = []
+
+    def _hub_answered(self, now: float) -> None:
+        """The hub answered a request: the session is alive and not idle."""
+        self._last_exchange = now
+        self._fail_streak = []
+        self._probe_at = 0.0
+
+    def _probe_missed(self, now: float) -> None:
+        target = self._probe_target or GATEWAY
+        self._probe_at = 0.0
+        self._fail_streak.append(target)
+        self._signals[target]["missed"] += 1
+        log.info("keepalive probe unanswered", extra={
+            "target": target, "streak": len(self._fail_streak)})
+        if target != GATEWAY:
+            self._misses[target] += 1
+            if self._misses[target] >= self._miss_limit:
+                self._leave_rotation(target, "never answers")
+
+    def _join_rotation(self, child_id: str) -> None:
+        self._unprobeable.discard(child_id)
+        if child_id not in self._rotation:
+            self._rotation.append(child_id)
+            log.info("child joined keepalive rotation", extra={"child": child_id})
+
+    def _leave_rotation(self, child_id: str, why: str) -> None:
+        if child_id in self._rotation:
+            self._rotation.remove(child_id)
+            log.info("child left keepalive rotation", extra={"child": child_id, "why": why})
+        self._misses.pop(child_id, None)
+
+    def _signal(self, target: str, now: float) -> None:
+        sig = self._signals.get(target)
+        if sig is not None:
+            sig["last_signal"] = now
+
+    def _child_for_900(self) -> str | None:
+        """Which child a cid-less 900 answers: the outstanding child probe, or
+        the only child with a status query in flight."""
+        if self._probe_at and self._probe_target not in (None, GATEWAY):
+            return self._probe_target
+        mono = time.monotonic()
+        recent = [c for c, t in self._awaiting_status.items() if mono - t < STATUS_REPLY_WINDOW]
+        return recent[0] if len(recent) == 1 else None
 
     def _expire_commands(self) -> None:
         keep: list[_Command] = []
@@ -538,15 +676,29 @@ class Upstream:
             self._record_error(code, str(result.get("Error", "")))
             if code in LINK_ERRORS:
                 self._drop(code)
-            else:
-                payload = result.get("Payload")
-                # 900 "json obj data unvalid" is how the gateway answers a status
-                # query for a sub-device it has no data for (sleeping sensor):
-                # expected, counted in the health stats, not worth a log line.
-                level = logging.DEBUG if code == "900" else logging.INFO
-                log.log(level, "hub returned error", extra={
-                    "err": code, "child": expected_child,
-                    "payload": str(payload)[:160] if payload else None})
+                return False
+            now = time.time()
+            self._signal(GATEWAY, now)
+            if code == "900":
+                # the hub answered (it is alive); the child it answered for
+                # has no data to give: a sleepy sensor, useless as a probe.
+                child = expected_child or self._child_for_900()
+                if child:
+                    self._awaiting_status.pop(child, None)
+                    if child not in self._unprobeable:
+                        self._unprobeable.add(child)
+                        self._leave_rotation(child, "answers 900")
+                        log.info("child not probeable (900)", extra={"child": child})
+                # proves the hub hears us, so it settles the outstanding probe
+                self._hub_answered(now)
+            payload = result.get("Payload")
+            # 900 "json obj data unvalid" is how the gateway answers a status
+            # query for a sub-device it has no data for (sleeping sensor):
+            # expected, counted in the health stats, not worth a log line.
+            level = logging.DEBUG if code == "900" else logging.INFO
+            log.log(level, "hub returned error", extra={
+                "err": code, "child": expected_child,
+                "payload": str(payload)[:160] if payload else None})
             return False
 
         data = result.get("data") if isinstance(result.get("data"), dict) else {}
@@ -555,8 +707,14 @@ class Upstream:
         if not cid and dev is not None:
             cid = getattr(dev, "cid", None)
         dps = result.get("dps") or data.get("dps")
+        now = time.time()
+        self._signal(GATEWAY, now)
         if not cid:
-            log.debug("hub message without cid ignored", extra={"keys": sorted(result)})
+            if isinstance(dps, dict) and dps:
+                # the gateway's own DPs: the answer to a keepalive query
+                self._probe_answered(GATEWAY, now)
+            else:
+                log.debug("hub message without cid ignored", extra={"keys": sorted(result)})
             return False
         child_id = self._cid_to_child.get(cid)
         if child_id is None:
@@ -564,15 +722,15 @@ class Upstream:
             return False
         if not isinstance(dps, dict) or not dps:
             return False
+        self._signal(child_id, now)
         # A reply to our own status query is not a push; everything else is.
         sent = self._awaiting_status.pop(child_id, None)
         awaited = sent is not None and time.monotonic() - sent < STATUS_REPLY_WINDOW
         is_push = child_id != expected_child and not awaited
         if awaited or child_id == expected_child:
-            # it answers status queries, so it is a valid liveness probe target
-            self._responsive.add(child_id)
-            if child_id == self._probe_target:
-                self._unreliable.discard(child_id)
+            # it answers status queries, so it is a valid keepalive target
+            self._join_rotation(child_id)
+            self._probe_answered(child_id, now)
         dps = {str(k): v for k, v in dps.items()}
         self._confirm(child_id, dps)
         self._on_dps(child_id, dps, is_push)

@@ -134,6 +134,16 @@ class _Conn:
                     self.send(CT.HEART_BEAT, m.seqno, None)
             elif m.cmd in (CT.DP_QUERY_NEW, CT.DP_QUERY):
                 cid = data.get("cid")
+                if not cid:
+                    gw.gateway_queries += 1
+                    if gw.own_dps is not None and not gw.gateway_silent:
+                        # the gateway's own DPs, without a cid (as the real hub does)
+                        self.send_json(m.cmd, m.seqno, {"dps": gw.own_dps})
+                    continue
+                if cid in gw.err900:
+                    # what the hub says for a sub-device it has no data for
+                    self.send(m.cmd, m.seqno, b"json obj data unvalid")
+                    continue
                 if cid in gw.silent:
                     continue  # sleepy Zigbee device: the hub never answers
                 if cid in gw.children:
@@ -155,6 +165,10 @@ class MockGateway:
         self.real_key = real_key.encode("latin1")
         self.children = {cid: dict(d) for cid, d in children.items()}
         self.silent: set[str] = set()
+        self.err900: set[str] = set()  # children answered with "json obj data unvalid"
+        self.own_dps: dict | None = {"4": False, "32": "normal"}
+        self.gateway_silent = False  # ignore queries addressed to the gateway itself
+        self.gateway_queries = 0
         self.lock = threading.Lock()
         self.conns: list[_Conn] = []
         self.connections_total = 0

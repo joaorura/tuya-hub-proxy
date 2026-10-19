@@ -27,6 +27,9 @@ try:
         "errors": u["errors"],
         "last_error": u["last_error"],
         "session_age": round(time.time() - u["connected_since"]) if u["state"] == "connected" else 0,
+        "drop_reasons": u.get("drop_reasons", {}),
+        "available": d.get("available", True),
+        "gateway_probe_ok": int((d.get("keepalive") or {}).get("gateway", {}).get("last_probe_ok", 0)),
         "clients": sum(c["clients"] for c in d["children"].values()),
         "last_push": {name: int(c["last_push"]) for name, c in d["children"].items()},
     })

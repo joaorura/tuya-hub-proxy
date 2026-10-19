@@ -22,8 +22,13 @@ proxy:
   backoff_min: 2
   backoff_max: 300
   backoff_914: 10                       # min wait after a failed session negotiation
-  quiet_after: 15                       # quiet seconds before a liveness/keepalive status query
-  probe_timeout: 10                     # reconnect if that query stays unanswered
+  quiet_after: 15                       # seconds without an answer before a keepalive status query
+  probe_timeout: 10                     # a keepalive query unanswered after this counts as failed
+  gateway_probe_every: 2                # query the gateway itself every N keepalive cycles
+  probe_fail_limit: 3                   # reconnect after N failed probes in a row (any targets)...
+                                        # ...or earlier: gateway + another target failing in a row
+  probe_miss_limit: 2                   # a child missing N probes in a row leaves the rotation
+  unavailable_after: 120                # hub down this long -> fake devices refuse clients (0 = never)
   log_level: INFO
   log_format: json                      # json | text
 

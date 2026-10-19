@@ -89,12 +89,31 @@ class FakeDevice:
         return sock
 
     async def stop(self) -> None:
-        if self.server:
-            self.server.close()
+        server, self.server = self.server, None
+        if server:
+            server.close()
         for s in list(self.sessions):
             s.writer.close()
-        if self.server:
-            await self.server.wait_closed()
+        if server:
+            await server.wait_closed()
+
+    async def set_available(self, available: bool) -> None:
+        """Offline: drop every client and stop listening, so new connections
+        are refused.  Online: listen again on the same address."""
+        if available:
+            if self.server is None:
+                await self.start()
+            return
+        server, self.server = self.server, None
+        if server:
+            server.close()
+        for s in list(self.sessions):
+            s.writer.close()
+        if server:
+            try:
+                await asyncio.wait_for(server.wait_closed(), 2)
+            except asyncio.TimeoutError:
+                pass
 
     async def push(self, dps: dict[str, Any]) -> None:
         """Send a spontaneous STATUS (cmd 8) to every connected client."""

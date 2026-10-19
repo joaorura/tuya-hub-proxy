@@ -70,10 +70,23 @@ class ProxyConfig:
     backoff_max: float = 300.0
     backoff_914: float = 10.0  # minimum wait after a failed session negotiation
     # Some gateways ignore heartbeats and close a session that has been quiet
-    # for ~30 s.  After this many quiet seconds a status query is sent to a
-    # child that answers; if it stays unanswered for probe_timeout, reconnect.
+    # for ~30 s.  After this many seconds without an answer to anything sent,
+    # a keepalive status query goes to the next target of a rotation: the
+    # gateway itself every gateway_probe_every cycles, children that answer
+    # queries in between.  A probe counts as failed after probe_timeout.
     quiet_after: float = 15.0
     probe_timeout: float = 10.0
+    gateway_probe_every: int = 2
+    # The session is declared dead when consecutive probes fail on two
+    # distinct targets one of which is the gateway, or after this many
+    # consecutive failures whatever the targets.
+    probe_fail_limit: int = 3
+    # A child leaves the rotation after this many consecutive unanswered probes.
+    probe_miss_limit: int = 2
+    # With the hub session down for longer than this, the fake devices close
+    # their clients and refuse connections until it is back, so Home Assistant
+    # shows the entities as unavailable instead of stale.  0 disables.
+    unavailable_after: float = 120.0
     log_level: str = "INFO"
     log_format: str = "json"
 
