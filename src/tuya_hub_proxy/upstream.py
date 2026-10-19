@@ -97,6 +97,8 @@ class Upstream:
         backoff_min: float = 2.0,
         backoff_max: float = 300.0,
         backoff_914: float = 10.0,
+        quiet_after: float = 30.0,
+        probe_timeout: float = 15.0,
         device_factory: Callable[..., Any] = tinytuya.Device,
     ) -> None:
         self._hub = hub
@@ -109,6 +111,8 @@ class Upstream:
         self._backoff_min = backoff_min
         self._backoff_max = backoff_max
         self._backoff_914 = backoff_914
+        self._quiet_after = quiet_after
+        self._probe_timeout = probe_timeout
         self._factory = device_factory
 
         self.stats = UpstreamStats()
@@ -126,6 +130,8 @@ class Upstream:
         self._pending_refresh: set[str] = set()
         self._awaiting_status: set[str] = set()  # children with a query in flight
         self._op = "idle"  # last tinytuya operation, for diagnostics
+        self._probe_at = 0.0  # when the current liveness probe was sent
+        self._responsive: set[str] = set()  # children that answered status queries
 
     # ------------------------------------------------------------------ API
     def start(self) -> None:
@@ -236,6 +242,7 @@ class Upstream:
         gw.set_socketTimeout(self._rx_timeout)
         self._gw, self._kids = gw, kids
         self._sock_id = id(gw.socket)
+        self._probe_at = 0.0
         self.stats.connects += 1
         self.stats.consecutive_failures = 0
         self.stats.state = "connected"
@@ -333,8 +340,7 @@ class Upstream:
             self._handle_result(gw.heartbeat(nowait=True), None)
             if not self._check_socket():
                 return
-            if time.time() - self.stats.last_rx > max(3 * self._hb_interval, 30):
-                self._drop("no traffic from hub")
+            if not self._liveness_ok():
                 return
         # Wait for hub data OR a command, whichever comes first.
         if not gw.received_wrong_cid_queue:
@@ -356,6 +362,28 @@ class Upstream:
             self.stats.last_rx = time.time()
         self._handle_result(result, None)
         self._check_socket()
+
+    def _liveness_ok(self) -> bool:
+        """Silence alone is not a dead session: some gateways never answer
+        heartbeats.  After a quiet period, probe with a status query to a child
+        that has answered before, and only drop if the probe goes unanswered.
+        """
+        now = time.time()
+        if self._probe_at and self.stats.last_rx >= self._probe_at:
+            self._probe_at = 0.0  # probe (or anything else) answered
+        if self._probe_at:
+            if now - self._probe_at > self._probe_timeout:
+                self._probe_at = 0.0
+                self._drop("liveness probe unanswered")
+                return False
+            return True
+        if now - self.stats.last_rx > max(3 * self._hb_interval, self._quiet_after):
+            target = next(iter(self._responsive), None) or next(iter(self._child_to_cid))
+            log.debug("hub quiet, probing", extra={"child": target})
+            self._probe_at = now
+            self._do_refresh(target)
+            return self._gw is not None
+        return True
 
     def _expire_commands(self) -> None:
         keep: list[_Command] = []
@@ -477,5 +505,6 @@ class Upstream:
         # A reply to our own status query is not a push; everything else is.
         is_push = child_id != expected_child and child_id not in self._awaiting_status
         self._awaiting_status.discard(child_id)
+        self._responsive.add(child_id)
         self._on_dps(child_id, {str(k): v for k, v in dps.items()}, is_push)
         return True

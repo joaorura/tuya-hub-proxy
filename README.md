@@ -1,11 +1,22 @@
 # tuya-hub-proxy
 
+[![tests](https://github.com/joaorura/tuya-hub-proxy/actions/workflows/tests.yml/badge.svg)](https://github.com/joaorura/tuya-hub-proxy/actions/workflows/tests.yml)
+![status: experimental](https://img.shields.io/badge/status-experimental-orange)
+![license: MIT](https://img.shields.io/badge/license-MIT-blue)
+
 Expose the Zigbee sub-devices of a Tuya gateway as **stand-alone Tuya Wi-Fi
 devices (protocol 3.3)**, so Home Assistant's
 [tuya-local](https://github.com/make-all/tuya-local) can control each of them
 independently — through a **single** connection to the gateway.
 
-> Português: veja [README.pt-BR.md](README.pt-BR.md).
+## Project status
+
+**Experimental.** The protocol logic is covered by an automated test suite
+that runs against a simulated gateway, plus an integration test that drives
+tuya-local's own device class. One real deployment (a Tuya Zigbee gateway
+speaking protocol 3.4, with door sensors and switches) is running; field
+validation on real hardware is in progress. Expect rough edges and please
+report what you find.
 
 ## The problem
 
@@ -142,8 +153,12 @@ switch* (DP 1) for single-gang switches.
 * **Single upstream**: the proxy must be the only local client of the gateway
   (the Tuya/Smart Life app via cloud is fine).
 * Gateway push format variants are handled (`{"cid", "dps"}` and
-  `{"data": {"cid", "dps"}}`), but so far the upstream side has only been
-  tested against the bundled gateway simulator — field reports welcome.
+  `{"data": {"cid", "dps"}}`). Only one real gateway model has been tried so
+  far — field reports welcome.
+* Observed gateway behaviour the proxy accounts for: it answers status queries
+  for a sleeping sub-device with error 900 `json obj data unvalid`, it does
+  not answer heartbeats (liveness is checked with a status probe instead), and
+  it may refuse new connections for a few seconds right after a session ends.
 
 ## Development
 
@@ -158,6 +173,19 @@ TUYA_LOCAL_PATH=/tmp/tuya-local .venv/bin/pytest -v tests/test_tuya_local_integr
 The test suite needs no hardware: `tests/mock_gateway.py` simulates a 3.4
 gateway (including the session-key negotiation and forced 914 failures), and
 real `tinytuya.Device` clients talk to the fake devices.
+
+## Acknowledgements
+
+This project was developed with the help of AI tools. All code is covered by
+the automated tests described above; validation on real hardware is in
+progress. Thanks to [tinytuya](https://github.com/jasonacox/tinytuya) and
+[tuya-local](https://github.com/make-all/tuya-local), whose work this builds on.
+
+## Contributing
+
+Issues and pull requests are welcome. Please run `pytest` before submitting,
+and never include real device ids, local keys or IP addresses in issues, logs
+or test fixtures.
 
 ## License
 

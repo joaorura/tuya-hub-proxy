@@ -230,3 +230,43 @@ def test_health_snapshot(gateway, tmp_path):
             await proxy.stop()
 
     run(scenario())
+
+
+def _fast_watchdog_proxy(gateway, tmp_path):
+    return Proxy(make_config(gateway.port, tmp_path, heartbeat_interval=0.3),
+                 quiet_after=1.0, probe_timeout=1.0)
+
+
+def test_silent_heartbeats_do_not_drop_a_live_session(gateway, tmp_path):
+    """Some gateways never answer heartbeats; a probe answer keeps the session."""
+    gateway.answer_heartbeats = False
+
+    async def scenario():
+        proxy = _fast_watchdog_proxy(gateway, tmp_path)
+        await proxy.start()
+        try:
+            assert await wait_until(lambda: proxy.upstream.connected, 5)
+            await asyncio.sleep(5)
+            assert gateway.connections_total == 1
+            assert proxy.upstream.stats.disconnects == 0
+        finally:
+            await proxy.stop()
+
+    run(scenario())
+
+
+def test_dead_but_open_session_is_dropped_after_unanswered_probe(gateway, tmp_path):
+    async def scenario():
+        proxy = _fast_watchdog_proxy(gateway, tmp_path)
+        await proxy.start()
+        try:
+            assert await wait_until(lambda: proxy.upstream.connected, 5)
+            gateway.mute = True
+            assert await wait_until(lambda: proxy.upstream.stats.disconnects >= 1, 10)
+            gateway.mute = False
+            assert await wait_until(lambda: proxy.upstream.connected and gateway.sessions == 1, 10)
+            assert gateway.max_negotiating == 1
+        finally:
+            await proxy.stop()
+
+    run(scenario())

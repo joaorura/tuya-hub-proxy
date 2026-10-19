@@ -127,8 +127,11 @@ class _Conn:
             body = self._decrypt(m.payload, self.key)
             data = json.loads(body) if body else {}
             gw.received.append((m.cmd, data))
+            if gw.mute:
+                continue
             if m.cmd == CT.HEART_BEAT:
-                self.send(CT.HEART_BEAT, m.seqno, None)
+                if gw.answer_heartbeats:
+                    self.send(CT.HEART_BEAT, m.seqno, None)
             elif m.cmd in (CT.DP_QUERY_NEW, CT.DP_QUERY):
                 cid = data.get("cid")
                 if cid in gw.silent:
@@ -157,6 +160,8 @@ class MockGateway:
         self.max_negotiating = 0
         self.negotiations = 0
         self.reject_negotiations = 0
+        self.answer_heartbeats = True
+        self.mute = False  # keep the socket open but never answer anything
         self.received: list[tuple[int, dict]] = []
         self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
