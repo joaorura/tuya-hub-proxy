@@ -270,3 +270,22 @@ def test_dead_but_open_session_is_dropped_after_unanswered_probe(gateway, tmp_pa
             await proxy.stop()
 
     run(scenario())
+
+
+def test_event_after_unanswered_query_is_still_a_push(gateway, tmp_path, monkeypatch):
+    """A query the hub never answers must not make later events look like replies."""
+    import tuya_hub_proxy.upstream as up
+
+    monkeypatch.setattr(up, "STATUS_REPLY_WINDOW", 0.5)
+    gateway.silent.add(DOOR_CID)
+
+    async def scenario():
+        proxy = await start_proxy(gateway, tmp_path)
+        try:
+            await asyncio.sleep(1.0)  # initial query for the door went unanswered
+            gateway.push(DOOR_CID, {"101": True})
+            assert await wait_until(lambda: proxy.cache.get(DOOR_ID).last_push > 0)
+        finally:
+            await proxy.stop()
+
+    run(scenario())

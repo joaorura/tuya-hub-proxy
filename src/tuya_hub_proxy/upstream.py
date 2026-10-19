@@ -38,6 +38,9 @@ log = logging.getLogger(__name__)
 LINK_ERRORS = {"901", "902", "905", "906", "914"}
 ERR_KEY_OR_VER = "914"
 
+#: How long after a status query an incoming report counts as its answer.
+STATUS_REPLY_WINDOW = 5.0
+
 DpsCallback = Callable[[str, dict[str, Any], bool], None]  # child_id, dps, is_push
 
 
@@ -128,7 +131,10 @@ class Upstream:
         self._sock_id: int | None = None
         self._last_hb = 0.0
         self._pending_refresh: set[str] = set()
-        self._awaiting_status: set[str] = set()  # children with a query in flight
+        # children with a status query in flight -> when it was sent.  The
+        # gateway may never answer (or answer with an error that carries no
+        # cid), so entries expire after STATUS_REPLY_WINDOW seconds.
+        self._awaiting_status: dict[str, float] = {}
         self._op = "idle"  # last tinytuya operation, for diagnostics
         self._probe_at = 0.0  # when the current liveness probe was sent
         self._responsive: set[str] = set()  # children that answered status queries
@@ -461,7 +467,7 @@ class Upstream:
         if isinstance(res, dict) and "Err" in res:
             self._handle_result(res, child_id)
             return False
-        self._awaiting_status.add(child_id)
+        self._awaiting_status[child_id] = time.monotonic()
         return self._check_socket()
 
     # -- result dispatch ----------------------------------------------------
@@ -503,8 +509,9 @@ class Upstream:
         if not isinstance(dps, dict) or not dps:
             return False
         # A reply to our own status query is not a push; everything else is.
-        is_push = child_id != expected_child and child_id not in self._awaiting_status
-        self._awaiting_status.discard(child_id)
+        sent = self._awaiting_status.pop(child_id, None)
+        awaited = sent is not None and time.monotonic() - sent < STATUS_REPLY_WINDOW
+        is_push = child_id != expected_child and not awaited
         self._responsive.add(child_id)
         self._on_dps(child_id, {str(k): v for k, v in dps.items()}, is_push)
         return True
