@@ -92,6 +92,12 @@ journalctl -u tuya-hub-proxy -f
 curl -s http://127.0.0.1:8765/health
 ```
 
+Aliases are added as `/32` so the host keeps its own address as the source of
+LAN traffic. If `nmcli device reapply` does not bring them up (seen on a bridge
+with NetworkManager 1.52), use `nmcli connection up <conn>`; on a bridge that
+also carries libvirt VMs this detaches their `vnetN` taps — re-attach with
+`ip link set vnetN master <bridge>`.
+
 `kind` controls the announced defaults: `door_sensor` (DP 101), `switch`
 (DP 1) or `generic` (none). Extra `defaults` can be set per child.
 

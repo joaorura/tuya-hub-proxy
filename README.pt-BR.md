@@ -93,8 +93,12 @@ curl -s http://127.0.0.1:8765/health
 ```
 
 O script de aliases roda `nmcli connection modify "<conexão>" +ipv4.addresses
-<ip>/24` para cada filho e depois `nmcli device reapply` (sem derrubar o link,
-então a sessão SSH sobrevive).
+<ip>/32` para cada filho e depois `nmcli device reapply` (sem derrubar o link,
+então a sessão SSH sobrevive). Os aliases são `/32` para o host continuar usando
+o próprio IP como origem do tráfego na LAN. Se o `reapply` não aplicar (visto
+numa bridge com NetworkManager 1.52), use `nmcli connection up <conexão>`; numa
+bridge que também atende VMs do libvirt isso solta as interfaces `vnetN` — religue
+com `ip link set vnetN master <bridge>`.
 
 ## Cadastro no tuya-local
 

@@ -450,7 +450,11 @@ class Upstream:
                 self._drop(code)
             else:
                 payload = result.get("Payload")
-                log.info("hub returned error", extra={
+                # 900 "json obj data unvalid" is how the gateway answers a status
+                # query for a sub-device it has no data for (sleeping sensor):
+                # expected, counted in the health stats, not worth a log line.
+                level = logging.DEBUG if code == "900" else logging.INFO
+                log.log(level, "hub returned error", extra={
                     "err": code, "child": expected_child,
                     "payload": str(payload)[:160] if payload else None})
             return False
