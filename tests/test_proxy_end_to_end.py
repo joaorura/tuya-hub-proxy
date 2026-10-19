@@ -112,6 +112,10 @@ def test_sleepy_child_keeps_default_and_cached_values(gateway, tmp_path):
             assert got["dps"] == {"103": 50}
             st = await asyncio.to_thread(door.status)
             assert st["dps"] == {"101": False, "103": 50}
+            # a child that never answers must not cost a reconnection
+            await asyncio.sleep(2.0)  # several receive timeouts
+            assert gateway.connections_total == 1 and gateway.negotiations == 1
+            assert not proxy.upstream.stats.errors
             door.close()
         finally:
             await proxy.stop()
