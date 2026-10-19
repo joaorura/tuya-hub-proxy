@@ -233,8 +233,8 @@ def test_health_snapshot(gateway, tmp_path):
 
 
 def _fast_watchdog_proxy(gateway, tmp_path):
-    return Proxy(make_config(gateway.port, tmp_path, heartbeat_interval=0.3),
-                 quiet_after=1.0, probe_timeout=1.0)
+    return Proxy(make_config(gateway.port, tmp_path, heartbeat_interval=0.3,
+                             quiet_after=1.0, probe_timeout=1.0))
 
 
 def test_silent_heartbeats_do_not_drop_a_live_session(gateway, tmp_path):

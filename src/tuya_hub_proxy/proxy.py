@@ -41,6 +41,8 @@ class Proxy:
             backoff_min=cfg.backoff_min,
             backoff_max=cfg.backoff_max,
             backoff_914=cfg.backoff_914,
+            quiet_after=cfg.quiet_after,
+            probe_timeout=cfg.probe_timeout,
             **upstream_kwargs,
         )
 

@@ -69,6 +69,11 @@ class ProxyConfig:
     backoff_min: float = 2.0
     backoff_max: float = 300.0
     backoff_914: float = 10.0  # minimum wait after a failed session negotiation
+    # Some gateways ignore heartbeats and close a session that has been quiet
+    # for ~30 s.  After this many quiet seconds a status query is sent to a
+    # child that answers; if it stays unanswered for probe_timeout, reconnect.
+    quiet_after: float = 15.0
+    probe_timeout: float = 10.0
     log_level: str = "INFO"
     log_format: str = "json"
 

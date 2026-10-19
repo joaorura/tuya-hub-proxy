@@ -22,6 +22,8 @@ proxy:
   backoff_min: 2
   backoff_max: 300
   backoff_914: 10                       # min wait after a failed session negotiation
+  quiet_after: 15                       # quiet seconds before a liveness/keepalive status query
+  probe_timeout: 10                     # reconnect if that query stays unanswered
   log_level: INFO
   log_format: json                      # json | text
 

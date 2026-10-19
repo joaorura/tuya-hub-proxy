@@ -97,8 +97,8 @@ class Upstream:
         backoff_min: float = 2.0,
         backoff_max: float = 300.0,
         backoff_914: float = 10.0,
-        quiet_after: float = 30.0,
-        probe_timeout: float = 15.0,
+        quiet_after: float = 15.0,
+        probe_timeout: float = 10.0,
         device_factory: Callable[..., Any] = tinytuya.Device,
     ) -> None:
         self._hub = hub
@@ -377,7 +377,7 @@ class Upstream:
                 self._drop("liveness probe unanswered")
                 return False
             return True
-        if now - self.stats.last_rx > max(3 * self._hb_interval, self._quiet_after):
+        if now - self.stats.last_rx > self._quiet_after:
             target = next(iter(self._responsive), None) or next(iter(self._child_to_cid))
             log.debug("hub quiet, probing", extra={"child": target})
             self._probe_at = now
